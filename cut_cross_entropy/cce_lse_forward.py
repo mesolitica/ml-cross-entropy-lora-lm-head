@@ -12,6 +12,9 @@ from cut_cross_entropy.tl_utils import b_bin_fn, tl_logaddexp, tl_softcapping
 def _cce_lse_forward_kernel(
     E,
     C,
+    C_A,
+    C_B,
+    ALPHA,
     LSE,
     LA,
     Locks,
@@ -24,6 +27,8 @@ def _cce_lse_forward_kernel(
     stride_ed,
     stride_cv,
     stride_cd,
+    stride_cav,
+    stride_cad,
     stride_lse_b,
     stride_vb,
     num_locks,
@@ -69,6 +74,7 @@ def _cce_lse_forward_kernel(
             e = tl.load(e_ptrs, mask=offs_d[None, :] < D - d * BLOCK_D, other=0.0)
             c = tl.load(c_ptrs, mask=offs_d[:, None] < D - d * BLOCK_D, other=0.0)
         accum = tl.dot(e, c, accum, input_precision=DOT_PRECISION)
+
         e_ptrs += BLOCK_D * stride_ed
         c_ptrs += BLOCK_D * stride_cd
 
@@ -150,6 +156,9 @@ def cce_lse_forward_kernel(
 def cce_lse_forward_kernel(
     e: torch.Tensor,
     c: torch.Tensor,
+    c_a,
+    c_b,
+    alpha,
     valids: torch.Tensor | None = None,
     softcap: float | None = None,
     return_logit_avg: bool = False,
@@ -164,6 +173,7 @@ def cce_lse_forward_kernel(
         B, _ = e.shape
 
     V, D = c.shape
+    print(e.shape, V, D)
     # Allocates output.
     lse = e.new_full((B,), -float("inf"), dtype=torch.float32)
     locks = e.new_full(
@@ -184,6 +194,9 @@ def cce_lse_forward_kernel(
     _cce_lse_forward_kernel[grid](
         e,
         c,
+        c_a,
+        c_b,
+        alpha,
         lse,  #
         logit_avg,
         locks,
@@ -196,6 +209,8 @@ def cce_lse_forward_kernel(
         e.stride(1),  #
         c.stride(0),
         c.stride(1),  #
+        c_a.stride(0),
+        c_b.stride(1),
         lse.stride(0),
         1 if valids is None else valids.stride(0),
         num_locks=locks.size(0),

@@ -38,6 +38,9 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         ctx,
         e: torch.Tensor,
         c: torch.Tensor,
+        c_a,
+        c_b,
+        alpha,
         params: CCEParams,
     ) -> torch.Tensor:
         needs_grad = e.requires_grad or c.requires_grad
@@ -46,6 +49,9 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         ret = cce_lse_forward_kernel(
             e,
             c,
+            c_a,
+            c_b,
+            alpha,
             params.valids,
             softcap=params.softcap,
             return_logit_avg=return_logit_avg,
@@ -59,7 +65,7 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
             logit_avg = None
 
         neg_dot = indexed_neg_dot_forward_kernel(
-            e, c, params.targets, params.shift, params.valids, params.softcap, lse.dtype
+            e, c, c_a, c_b, alpha, params.targets, params.shift, params.valids, params.softcap, lse.dtype
         )
 
         nll = neg_dot.add_(lse)
@@ -135,6 +141,9 @@ def linear_cross_entropy_apply(
 def cce_linear_cross_entropy(
     e: torch.Tensor,
     c: torch.Tensor,
+    c_a,
+    c_b,
+    alpha,
     targets: torch.Tensor,
     ignore_index: int = IGNORE_INDEX,
     softcap: float | None = None,
@@ -168,6 +177,9 @@ def cce_linear_cross_entropy(
     return linear_cross_entropy_apply(
         e,
         c,
+        c_a,
+        c_b,
+        alpha,
         CCEParams(
             targets,
             valids,
