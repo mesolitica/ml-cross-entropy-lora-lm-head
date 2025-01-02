@@ -21,7 +21,11 @@ def torch_compile_linear_cross_entropy_apply(
     ignore_index: int = IGNORE_INDEX,
     reduction: str = "mean",
 ) -> torch.Tensor:
-    logits = e @ c.T
+    left = e @ c.base_layer.weight.T
+    left_e = e.to(c.lora_A.default.weight.dtype)
+    right = c.scaling['default'] * ((left_e @ c.lora_A.default.weight.T) @ c.lora_B.default.weight.T)
+    right = right.to(left.dtype)
+    logits = left + right
 
     if softcap is not None:
         logits = softcapping(logits, softcap)
@@ -42,7 +46,7 @@ def torch_compile_linear_cross_entropy(
     shift: bool = False,
 ) -> torch.Tensor:
     assert e.size()[0:-1] == targets.size()
-    assert e.size(-1) == c.size(1)
+    assert e.size(-1) == c.base_layer.weight.size(1)
 
     orig_b_size = targets.size()
     e = e.contiguous()
