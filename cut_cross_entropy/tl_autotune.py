@@ -369,7 +369,7 @@ def _heuristics_from_config(config: Config) -> Callable[..., autotuner.Heuristic
 
 
 def _cce_forward_best_config() -> Config:
-    return Config(dict(BLOCK_B=256, BLOCK_V=128, BLOCK_D=32), num_warps=8, num_stages=3)
+    return Config(dict(BLOCK_B=32, BLOCK_V=32, BLOCK_D=32), num_warps=8)
 
 
 def cce_forward_autotune() -> Callable[..., autotuner.Autotuner | autotuner.Heuristics]:

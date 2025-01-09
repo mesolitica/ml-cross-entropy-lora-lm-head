@@ -7,44 +7,6 @@ import triton.language as tl
 
 from cut_cross_entropy.tl_autotune import cce_forward_autotune
 from cut_cross_entropy.tl_utils import b_bin_fn, tl_logaddexp, tl_softcapping
-
-def _matmul_kernel(
-    a_ptr, b_ptr, c_ptr,
-    M, N, K,
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
-    BLOCK_SIZE_M: tl.constexpr, 
-    BLOCK_SIZE_N: tl.constexpr, 
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        accumulator = tl.dot(a, b, accumulator)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, accumulator, mask=c_mask)
     
 
 def _cce_lse_forward_kernel(
@@ -61,12 +23,15 @@ def _cce_lse_forward_kernel(
     B,
     V,
     D,
+    R: tl.constexpr,
     stride_eb,
     stride_ed,
     stride_cv,
     stride_cd,
-    stride_cav,
+    stride_car,
     stride_cad,
+    stride_cbv,
+    stride_cbr,
     stride_lse_b,
     stride_vb,
     num_locks,
@@ -98,6 +63,7 @@ def _cce_lse_forward_kernel(
 
     offs_v = (pid_v * BLOCK_V + tl.arange(0, BLOCK_V)) % V
     offs_d = tl.arange(0, BLOCK_D)
+    offs_r = tl.arange(0, R)
     e_ptrs = E + (offs_b[:, None] * stride_eb + offs_d[None, :] * stride_ed)
     c_ptrs = C + (offs_v[None, :] * stride_cv + offs_d[:, None] * stride_cd)
 
@@ -111,11 +77,32 @@ def _cce_lse_forward_kernel(
         else:
             e = tl.load(e_ptrs, mask=offs_d[None, :] < D - d * BLOCK_D, other=0.0)
             c = tl.load(c_ptrs, mask=offs_d[:, None] < D - d * BLOCK_D, other=0.0)
+
         accum = tl.dot(e, c, accum, input_precision=DOT_PRECISION)
 
         e_ptrs += BLOCK_D * stride_ed
         c_ptrs += BLOCK_D * stride_cd
+    
+    e_ptrs = E + (offs_b[:, None] * stride_eb + offs_d[None, :] * stride_ed)
+    temp = tl.zeros((BLOCK_B, R), dtype=tl.float32)
+    for d in range(0, tl.cdiv(D, BLOCK_D)):
+        if EVEN_D:
+            e = tl.load(e_ptrs)
+        else:
+            e = tl.load(e_ptrs, mask=offs_d[None, :] < D - d * BLOCK_D, other=0.0)
+        
+        w1_ptrs = C_A + (offs_r[None, :] * stride_car + offs_d[:, None] * stride_cad)
+        mask_w1 = (offs_r[None, :] < R) & (offs_d[:, None] < D)
+        w1 = tl.load(w1_ptrs, mask=mask_w1, other=0.0)
+        temp = tl.dot(e.to(w1.dtype), w1, temp, input_precision=DOT_PRECISION)
+        e_ptrs += BLOCK_D * stride_ed
 
+    w2_ptrs = C_B + (offs_v[None, :] * stride_cbv + offs_r[:, None] * stride_cbr)
+    mask_w2 = (offs_v[None, :] < V) & (offs_r[:, None] < R)
+    w2 = tl.load(w2_ptrs, mask=mask_w2, other=0.0)
+    lora_acc = tl.dot(temp.to(w2.dtype), w2)
+    
+    accum = accum + ALPHA * lora_acc
     v_mask = (pid_v * BLOCK_V + tl.arange(0, BLOCK_V)) < V
     logits = tl.where(v_mask[None, :], accum, -float("inf"))
     if HAS_SOFTCAP:
@@ -217,6 +204,7 @@ def cce_lse_forward_kernel(
         B, _ = e.shape
 
     V, D = c.shape
+    R, _ = c_a.shape
     lse = e.new_full((B,), -float("inf"), dtype=torch.float32)
     locks = e.new_full(
         (triton.cdiv(B, 128),),
@@ -228,8 +216,6 @@ def cce_lse_forward_kernel(
         logit_avg = e.new_full((V,), 0.0, dtype=torch.float32)
     else:
         logit_avg = None
-    
-
 
     def grid(META) -> tuple[int]:
         return (triton.cdiv(B, META["BLOCK_B"]) * triton.cdiv(V, META["BLOCK_V"]),)
@@ -237,21 +223,25 @@ def cce_lse_forward_kernel(
     _cce_lse_forward_kernel[grid](
         e,
         c,
+        c_a,
         c_b,
         alpha,
-        lse,  #
+        lse,
         logit_avg,
         locks,
         valids,
         softcap,
         B,
         V,
-        D,  #
+        D,
+        R,
         e.stride(0),
         e.stride(1),  #
         c.stride(0),
         c.stride(1),  #
         c_a.stride(0),
+        c_a.stride(1),
+        c_b.stride(0),
         c_b.stride(1),
         lse.stride(0),
         1 if valids is None else valids.stride(0),

@@ -65,7 +65,7 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
             logit_avg = None
 
         neg_dot = indexed_neg_dot_forward_kernel(
-            e, c, c_a, c_b, alpha, params.targets, params.shift, params.valids, params.softcap, lse.dtype
+            e, c, params.targets, params.shift, params.valids, params.softcap, lse.dtype
         )
 
         nll = neg_dot.add_(lse)
@@ -126,9 +126,12 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
 def linear_cross_entropy_apply(
     e: torch.Tensor,
     c: torch.Tensor,
+    c_a,
+    c_b,
+    alpha,
     params: CCEParams,
 ) -> torch.Tensor:
-    loss = LinearCrossEntropyFunction.apply(e, c, params)
+    loss = LinearCrossEntropyFunction.apply(e, c, c_a, c_b, alpha, params)
     assert isinstance(loss, torch.Tensor)
 
     if params.shift and params.reduction == "none":

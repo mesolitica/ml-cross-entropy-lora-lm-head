@@ -42,3 +42,4 @@ my_scripts/
 .model_cache/
 !triton-lora.ipynb
 !torch-compile-llama-3.2-3b.ipynb
+!forward.ipynb
