@@ -41,3 +41,4 @@ my_scripts/
 
 .model_cache/
 !triton-lora.ipynb
+!triton-lora-v2.ipynb
