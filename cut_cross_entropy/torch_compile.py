@@ -15,15 +15,16 @@ from cut_cross_entropy.utils import (
 def torch_compile_linear_cross_entropy_apply(
     e: torch.Tensor,
     c: torch.Tensor,
+    c_a, c_b, alpha,
     targets: torch.Tensor,
     softcap: float | None = None,
     *,
     ignore_index: int = IGNORE_INDEX,
     reduction: str = "mean",
 ) -> torch.Tensor:
-    left = e @ c.base_layer.weight.T
-    left_e = e.to(c.lora_A.default.weight.dtype)
-    right = c.scaling['default'] * ((left_e @ c.lora_A.default.weight.T) @ c.lora_B.default.weight.T)
+    left = e @ cT
+    left_e = e.to(c_a.dtype)
+    right = alpha * ((left_e @ c_a.T) @ c_b.T)
     right = right.to(left.dtype)
     logits = left + right
 

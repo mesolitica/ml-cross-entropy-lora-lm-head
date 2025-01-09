@@ -29,6 +29,9 @@ else:
 def linear_cross_entropy(
     e: torch.Tensor,
     c: torch.Tensor,
+    c_a,
+    c_b,
+    alpha,
     targets: torch.Tensor,
     ignore_index: int = IGNORE_INDEX,
     softcap: float | None = None,
@@ -60,7 +63,7 @@ def linear_cross_entropy(
             )
         case "torch_compile":
             return torch_compile_linear_cross_entropy(
-                e, c, targets, ignore_index, softcap, reduction, shift
+                e, c, c_a, c_b, alpha, targets, ignore_index, softcap, reduction, shift
             )
         case _:
             raise NotImplementedError(f"{impl} is not implemented.")
