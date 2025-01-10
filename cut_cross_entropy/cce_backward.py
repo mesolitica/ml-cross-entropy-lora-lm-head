@@ -241,6 +241,9 @@ def cce_backward_kernel(
     do: torch.Tensor,
     e: torch.Tensor,
     c: torch.Tensor,
+    c_a,
+    c_b,
+    alpha,
     lse: torch.Tensor,
     valids: torch.Tensor | None,
     softcap: float | None,
@@ -267,6 +270,8 @@ def cce_backward_kernel(
 
     de = torch.zeros_like(e)
     dc = torch.zeros_like(c)
+    dc_a = torch.zeros_like(c_a)
+    dc_b = torch.zeros_like(c_b)
 
     assert de.stride() == e.stride()
     assert dc.stride() == c.stride()
@@ -325,4 +330,4 @@ def cce_backward_kernel(
         SHIFT=shift,
     )
 
-    return de, dc
+    return de, dc, dc_a, dc_b
