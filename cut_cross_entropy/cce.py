@@ -80,14 +80,16 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         else:
             raise ValueError(f"Unknown reduction {reduction}")
 
-        ctx.save_for_backward(e, c, c_a, c_b, alpha, lse, params.targets, params.valids, logit_avg)
+        ctx.save_for_backward(e, c, c_a, c_b, lse, params.targets, params.valids, logit_avg)
         ctx.params = params
+        ctx.alpha = alpha
 
         return loss
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
-        h, w, w_a, w_b, alpha, lse, targets, valids, logit_avg = ctx.saved_tensors
+        h, w, w_a, w_b, lse, targets, valids, logit_avg = ctx.saved_tensors
+        alpha = ctx.alpha
 
         if logit_avg is not None:
             vocab_ordering = sort_logit_avg(logit_avg)

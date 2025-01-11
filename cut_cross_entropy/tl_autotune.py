@@ -397,7 +397,7 @@ def _bw_total_store_fn(B, V, D, dtsize, num_cta_b, num_cta_v):
 
 
 def _cce_backward_best_config() -> Config:
-    return Config(dict(BLOCK_B=128, BLOCK_V=128, BLOCK_D=32), num_warps=4, num_stages=4)
+    return Config(dict(BLOCK_B=32, BLOCK_V=32, BLOCK_D=32), num_warps=8)
 
 
 def cce_backward_autotune() -> Callable[..., autotuner.Autotuner | autotuner.Heuristics]:

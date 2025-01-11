@@ -65,6 +65,9 @@ def _block_is_filtered(check_val: tl.tensor, filter_eps: tl.tensor) -> tl.tensor
 def _cce_backward_kernel(
     E,
     C,
+    C_A,
+    C_B,
+    ALPHA,
     LSE,
     dOut,
     grad_scale,
@@ -76,9 +79,12 @@ def _cce_backward_kernel(
     dELocks,
     dC,
     dCLocks,
+    dc_a,
+    dc_b,
     B,
     D,
     V,
+    R: tl.constexpr,
     n_de_locks_0,
     n_de_locks_1,
     n_dc_locks_0,
@@ -88,6 +94,10 @@ def _cce_backward_kernel(
     stride_cv,
     stride_cd,
     stride_vb,
+    stride_car,
+    stride_cad,
+    stride_cbv,
+    stride_cbr,
     filter_eps,
     B_BIN,
     BLOCK_B: tl.constexpr,
@@ -124,6 +134,7 @@ def _cce_backward_kernel(
         offs_v = tl.load(VocabOrdering + offs_v)
 
     offs_d = tl.arange(0, BLOCK_D)
+    offs_r = tl.arange(0, R)
     e_ptrs = E + (offs_b[:, None] * stride_eb + offs_d[None, :] * stride_ed)
     c_ptrs = C + (offs_v[None, :] * stride_cv + offs_d[:, None] * stride_cd)
 
@@ -140,6 +151,27 @@ def _cce_backward_kernel(
 
         e_ptrs += BLOCK_D * stride_ed
         c_ptrs += BLOCK_D * stride_cd
+    
+    e_ptrs = E + (offs_b[:, None] * stride_eb + offs_d[None, :] * stride_ed)
+    temp = tl.zeros((BLOCK_B, R), dtype=tl.float32)
+    for d in range(0, tl.cdiv(D, BLOCK_D)):
+        if EVEN_D:
+            e = tl.load(e_ptrs)
+        else:
+            e = tl.load(e_ptrs, mask=offs_d[None, :] < D - d * BLOCK_D, other=0.0)
+        
+        w1_ptrs = C_A + (offs_r[None, :] * stride_car + offs_d[:, None] * stride_cad)
+        mask_w1 = (offs_r[None, :] < R) & (offs_d[:, None] < D)
+        w1 = tl.load(w1_ptrs, mask=mask_w1, other=0.0)
+        temp = tl.dot(e.to(w1.dtype), w1, temp)
+        e_ptrs += BLOCK_D * stride_ed
+    
+    w2_ptrs = C_B + (offs_v[None, :] * stride_cbv + offs_r[:, None] * stride_cbr)
+    mask_w2 = (offs_v[None, :] < V) & (offs_r[:, None] < R)
+    w2 = tl.load(w2_ptrs, mask=mask_w2, other=0.0)
+    lora_acc = tl.dot(temp.to(w2.dtype), w2)
+
+    accum = accum + ALPHA * lora_acc
 
     if HAS_SOFTCAP:
         accum = tl_softcapping(accum, softcap)
@@ -217,6 +249,46 @@ def _cce_backward_kernel(
         MM_BACK_BLOCK_D,
         MM_BACK_EVEN_D,
     )
+
+    # ∂L/∂A
+    pointer_dC = dC + (offs_v[None, :] * stride_cv + offs_d[:, None] * stride_cd)
+    for d in range(0, tl.cdiv(D, BLOCK_D)):
+        if EVEN_D:
+            dL_dC = tl.load(pointer_dC)
+        else:
+            dL_dC = tl.load(pointer_dC, mask=offs_d[None, :] < D - d * BLOCK_D, other=0.0)
+        
+        dL_dc_a = tl.dot(w2, tl.trans(dL_dC.to(w2.dtype)))
+
+        dc_a_ptrs = dc_a + (offs_r[:, None] * stride_car + offs_d[None, :] * stride_cad)
+        mask_dc_a = (offs_r[:, None] < R) & (offs_d[None, :] < D)
+        cur_v = tl.load(dc_a_ptrs, mask=mask_dc_a, other=0.0)
+        new_v = cur_v + dL_dc_a
+        tl.store(dc_a_ptrs, new_v, mask=mask_dc_a, eviction_policy="evict_last")
+        
+        pointer_dC += BLOCK_D * stride_cd
+        
+    # ∂L/∂B
+    pointer_dC = dC + (offs_v[None, :] * stride_cv + offs_d[:, None] * stride_cd)
+    for d in range(0, tl.cdiv(D, BLOCK_D)):
+        if EVEN_D:
+            dL_dC = tl.load(pointer_dC)
+        else:
+            dL_dC = tl.load(pointer_dC, mask=offs_d[None, :] < D - d * BLOCK_D, other=0.0)
+        
+        w1_ptrs = C_A + (offs_r[None, :] * stride_car + offs_d[:, None] * stride_cad)
+        mask_w1 = (offs_r[None, :] < R) & (offs_d[:, None] < D)
+        w1 = tl.load(w1_ptrs, mask=mask_w1, other=0.0)
+
+        dL_dc_b = tl.dot(tl.trans(dL_dC).to(w1.dtype), w1)
+
+        dc_b_ptrs = dc_b + (offs_v[:, None] * stride_cbv + offs_r[None, :] * stride_cbr)
+        mask_dc_b = (offs_v[:, None] < V) & (offs_r[None,: ] < R)
+        cur_v = tl.load(dc_b_ptrs, mask=mask_dc_b, other=0.0)
+        new_v = cur_v + dL_dc_b
+        tl.store(dc_b_ptrs, new_v, mask=mask_dc_b, eviction_policy="evict_last")
+        
+        pointer_dC += BLOCK_D * stride_cd
 
 
 _cce_backward_kernel = triton.jit(_cce_backward_kernel)
@@ -299,9 +371,68 @@ def cce_backward_kernel(
     de_locks = e.new_zeros((triton.cdiv(B, nd_locks), nd_locks), dtype=torch.int32)
     dc_locks = c.new_zeros((triton.cdiv(c.size(0), nd_locks), nd_locks), dtype=torch.int32)
 
+    """
+    def _cce_backward_kernel(
+    E,
+    C,
+    C_A,
+    C_B,
+    ALPHA,
+    LSE,
+    dOut,
+    grad_scale,
+    Valids,
+    VocabOrdering,
+    softcap,
+    Targets,
+    dE,
+    dELocks,
+    dC,
+    dCLocks,
+    dc_a,
+    dc_b,
+    B,
+    D,
+    V,
+    R: tl.constexpr,
+    n_de_locks_0,
+    n_de_locks_1,
+    n_dc_locks_0,
+    n_dc_locks_1,
+    stride_eb,
+    stride_ed,
+    stride_cv,
+    stride_cd,
+    stride_vb,
+    stride_car,
+    stride_cad,
+    stride_cbv,
+    stride_cbr,
+    filter_eps,
+    B_BIN,
+    BLOCK_B: tl.constexpr,
+    BLOCK_V: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    MM_BACK_BLOCK_D: tl.constexpr,
+    GROUP_B: tl.constexpr,
+    EVEN_D: tl.constexpr,
+    MM_BACK_EVEN_D: tl.constexpr,
+    ITEM_DO: tl.constexpr,
+    HAS_VALIDS: tl.constexpr,
+    HAS_VOCAB_ORDERING: tl.constexpr,
+    FILTER_GRAD: tl.constexpr,
+    HAS_TARGETS: tl.constexpr,
+    HAS_SOFTCAP: tl.constexpr,
+    SHIFT: tl.constexpr,
+):
+    """
+
     _cce_backward_kernel[grid](
         e,
         c,
+        c_a,
+        c_b,
+        alpha,
         lse,
         do,
         grad_scale,
@@ -313,9 +444,12 @@ def cce_backward_kernel(
         de_locks,
         dc,
         dc_locks,
+        dc_a,
+        dc_b,
         B,
         e.size(1),
         c.size(0),
+        c_a.size(0),
         de_locks.size(0),
         de_locks.size(1),
         dc_locks.size(0),
@@ -325,6 +459,10 @@ def cce_backward_kernel(
         c.stride(0),
         c.stride(1),
         1 if valids is None else valids.stride(0),
+        c_a.stride(0),
+        c_a.stride(1),
+        c_b.stride(0),
+        c_b.stride(1),
         filter_eps,
         B_BIN=b_bin_fn(B),
         SHIFT=shift,
