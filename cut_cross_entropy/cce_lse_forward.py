@@ -84,6 +84,8 @@ def _cce_lse_forward_kernel(
         c_ptrs += BLOCK_D * stride_cd
     
     e_ptrs = E + (offs_b[:, None] * stride_eb + offs_d[None, :] * stride_ed)
+    c_a_ptrs = C_A + (offs_r[None, :] * stride_car + offs_d[:, None] * stride_cad)
+
     temp = tl.zeros((BLOCK_B, R), dtype=tl.float32)
     for d in range(0, tl.cdiv(D, BLOCK_D)):
         if EVEN_D:
@@ -91,11 +93,11 @@ def _cce_lse_forward_kernel(
         else:
             e = tl.load(e_ptrs, mask=offs_d[None, :] < D - d * BLOCK_D, other=0.0)
         
-        w1_ptrs = C_A + (offs_r[None, :] * stride_car + offs_d[:, None] * stride_cad)
-        mask_w1 = (offs_r[None, :] < R) & (offs_d[:, None] < D)
-        w1 = tl.load(w1_ptrs, mask=mask_w1, other=0.0)
-        temp = tl.dot(e.to(w1.dtype), w1, temp, input_precision=DOT_PRECISION)
+        c_a = tl.load(c_a_ptrs)
+        temp = tl.dot(e.to(c_a.dtype), c_a, temp, input_precision=DOT_PRECISION)
+
         e_ptrs += BLOCK_D * stride_ed
+        c_a_ptrs += BLOCK_D * stride_cad
 
     w2_ptrs = C_B + (offs_v[None, :] * stride_cbv + offs_r[:, None] * stride_cbr)
     mask_w2 = (offs_v[None, :] < V) & (offs_r[:, None] < R)
