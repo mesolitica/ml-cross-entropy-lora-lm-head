@@ -15,14 +15,16 @@ from cut_cross_entropy.utils import (
 def torch_compile_linear_cross_entropy_apply(
     e: torch.Tensor,
     c: torch.Tensor,
-    c_a, c_b, alpha,
+    c_a: torch.Tensor,
+    c_b: torch.Tensor,
+    alpha: float,
     targets: torch.Tensor,
     softcap: float | None = None,
     *,
     ignore_index: int = IGNORE_INDEX,
     reduction: str = "mean",
 ) -> torch.Tensor:
-    left = e @ cT
+    left = e @ c.T
     left_e = e.to(c_a.dtype)
     right = alpha * ((left_e @ c_a.T) @ c_b.T)
     right = right.to(left.dtype)
@@ -40,6 +42,9 @@ def torch_compile_linear_cross_entropy_apply(
 def torch_compile_linear_cross_entropy(
     e: torch.Tensor,
     c: torch.Tensor,
+    c_a: torch.Tensor,
+    c_b: torch.Tensor,
+    alpha: float,
     targets: torch.Tensor,
     ignore_index: int = IGNORE_INDEX,
     softcap: float | None = None,
@@ -47,7 +52,7 @@ def torch_compile_linear_cross_entropy(
     shift: bool = False,
 ) -> torch.Tensor:
     assert e.size()[0:-1] == targets.size()
-    assert e.size(-1) == c.base_layer.weight.size(1)
+    assert e.size(-1) == c.size(1)
 
     orig_b_size = targets.size()
     e = e.contiguous()
@@ -65,6 +70,9 @@ def torch_compile_linear_cross_entropy(
     loss = torch_compile_linear_cross_entropy_apply(
         e,
         c,
+        c_a,
+        c_b,
+        alpha,
         targets,
         softcap,
         ignore_index=ignore_index,

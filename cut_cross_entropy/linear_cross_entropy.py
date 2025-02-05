@@ -29,9 +29,9 @@ else:
 def linear_cross_entropy(
     e: torch.Tensor,
     c: torch.Tensor,
-    c_a,
-    c_b,
-    alpha,
+    c_a: torch.Tensor,
+    c_b: torch.Tensor,
+    alpha: float,
     targets: torch.Tensor,
     ignore_index: int = IGNORE_INDEX,
     softcap: float | None = None,
